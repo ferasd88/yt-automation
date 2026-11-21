@@ -1,0 +1,184 @@
+name: produce-short
+
+on:
+  workflow_dispatch:
+    inputs:
+      short:
+        description: "Content id (encrypted folder content/<id>.enc)"
+        required: true
+      voice_run:
+        description: "Reuse narration from this run id"
+        default: ""
+      voice_run2:
+        description: "Second run id whose narration overrides the first"
+        default: ""
+      skip_build:
+        description: "Only generate narration"
+        default: "false"
+      lines:
+        description: "JSON list of line indexes to (re)generate, [] for none"
+        default: "[0,1,2,3,4,5,6,7,8,9]"
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: short-${{ github.event.inputs.short }}
+  cancel-in-progress: true
+
+env:
+  ID: ${{ github.event.inputs.short }}
+  SHORT: work
+  LAMH_KEY: ${{ secrets.LAMH_KEY }}
+
+jobs:
+  voice:
+    if: github.event.inputs.lines != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        line: ${{ fromJSON(github.event.inputs.lines) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: FFmpeg
+        run: |
+          pip install -q imageio-ffmpeg
+          sudo ln -sf "$(python -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())')" /usr/local/bin/ffmpeg
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-chatterbox-whisper-v1
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
+          df -h / | tail -1
+      - name: Install Chatterbox (CPU torch) + faster-whisper
+        run: |
+          pip install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q soundfile numpy librosa faster-whisper
+          pip install -q chatterbox-tts 2>&1 | tail -3
+          pip list 2>/dev/null | grep -iE "^(torch|torchaudio|chatterbox|nvidia)" | head
+          df -h / | tail -1
+      - name: Best-of-N take for line ${{ matrix.line }}
+        run: |
+          bash tools/lamh_crypt.sh unpack content/$ID.enc work
+          mkdir -p voice
+          set +e
+          python tools/tts_bestof.py $SHORT/script.json ${{ matrix.line }} voice > voice/log-${{ matrix.line }}.txt 2>&1
+          rc=$?
+          set -e
+          bash tools/lamh_crypt.sh text voice/log-${{ matrix.line }}.txt
+          mkdir -p venc && bash tools/lamh_crypt.sh pack voice venc/voice-${{ matrix.line }}.enc
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-${{ matrix.line }}
+          path: venc
+          retention-days: 3
+
+  build:
+    needs: voice
+    if: always() && github.event.inputs.skip_build != 'true' && (needs.voice.result == 'success' || needs.voice.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-whisper-medium-v1
+      - name: Decrypt content
+        run: bash tools/lamh_crypt.sh unpack content/$ID.enc work
+      - name: Tools and fonts
+        run: |
+          pip install -q imageio-ffmpeg soundfile numpy pillow playwright faster-whisper
+          sudo ln -sf "$(python -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())')" /usr/local/bin/ffmpeg
+          python -m playwright install chromium
+          mkdir -p ~/.fonts
+          for f in Regular Medium SemiBold Bold; do
+            curl -fsSL --max-time 30 -o ~/.fonts/IBMPlexSansArabic-$f.ttf "https://github.com/google/fonts/raw/main/ofl/ibmplexsansarabic/IBMPlexSansArabic-$f.ttf" || echo "missing $f"
+          done
+          curl -fsSL --max-time 30 -o ~/.fonts/Amiri-Regular.ttf "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Regular.ttf" || echo "missing Amiri"
+          fc-cache -f ~/.fonts && fc-list : family | grep -iE "plex|amiri" | sort -u
+      - name: Narration from an earlier run
+        if: github.event.inputs.voice_run != ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: voice-*
+          path: venc1
+          merge-multiple: true
+          run-id: ${{ github.event.inputs.voice_run }}
+          github-token: ${{ github.token }}
+      - name: Narration overrides from a second earlier run
+        if: github.event.inputs.voice_run2 != ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: voice-*
+          path: venc2
+          merge-multiple: true
+          run-id: ${{ github.event.inputs.voice_run2 }}
+          github-token: ${{ github.token }}
+      - name: Narration generated in this run (overrides)
+        if: needs.voice.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: voice-*
+          path: venc3
+          merge-multiple: true
+      - name: Decrypt narration (later runs override earlier ones)
+        run: |
+          mkdir -p voice logs
+          for d in venc1 venc2 venc3; do for f in $d/*.enc; do [ -f "$f" ] && bash tools/lamh_crypt.sh unpack "$f" voice; done; done
+          ls voice/*.wav | wc -l
+      - name: Image cache
+        uses: actions/cache@v4
+        with:
+          path: out/assets
+          key: assets-${{ hashFiles(format('{0}/assets.json', env.SHORT)) }}-${{ github.run_id }}
+          restore-keys: assets-${{ hashFiles(format('{0}/assets.json', env.SHORT)) }}-
+      - name: Fetch licensed images
+        run: |
+          mkdir -p logs
+          python tools/fetch_assets.py $SHORT/assets.json out/assets > logs/assets.txt 2>&1
+      - name: Audio (narration timing, music, SFX, mix)
+        run: python tools/short_audio.py $SHORT/script.json voice out > logs/audio.txt 2>&1
+      - name: Render 1080x1920
+        run: |
+          python tools/short_render.py out out/assets > logs/render.txt 2>&1
+      - name: Append «لمح» outro
+        run: |
+          mv out/short.mp4 out/story.mp4
+          python tools/short_finalize.py out/story.mp4 brand/lamh/outro.mp4 out/short.mp4 > logs/finalize.txt 2>&1
+      - name: Automated QA
+        id: qa
+        continue-on-error: true
+        run: |
+          python tools/short_qa.py $SHORT/script.json out > out/qa.txt 2>&1
+      - name: Publish (encrypted)
+        if: always()
+        run: |
+          mkdir -p /tmp/pub/stills /tmp/pub/takes /tmp/pub/logs
+          cp out/short.mp4 out/plan.json out/qa.json out/qa.txt /tmp/pub/ 2>/dev/null || true
+          cp out/stills/*.jpg /tmp/pub/stills/ 2>/dev/null || true
+          cp $SHORT/credits.json /tmp/pub/ 2>/dev/null || true
+          cp voice/*.json voice/log-*.txt /tmp/pub/takes/ 2>/dev/null || true
+          cp logs/*.txt /tmp/pub/logs/ 2>/dev/null || true
+          bash tools/lamh_crypt.sh pack /tmp/pub /tmp/bundle.enc
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan "out-$ID"
+          git rm -rfq .
+          git clean -fdxq
+          cp /tmp/bundle.enc .
+          git add -A
+          git commit -qm "out $ID run ${GITHUB_RUN_NUMBER} qa=${{ steps.qa.outcome }}"
+          git push -f origin "out-$ID"

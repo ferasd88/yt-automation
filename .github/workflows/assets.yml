@@ -1,0 +1,47 @@
+name: image-candidates
+
+on:
+  workflow_dispatch:
+    inputs:
+      short:
+        description: "Content id (encrypted folder content/<id>.enc)"
+        required: true
+      queries:
+        description: "Queries file inside the content folder"
+        default: "queries.json"
+
+permissions:
+  contents: write
+
+env:
+  ID: ${{ github.event.inputs.short }}
+  LAMH_KEY: ${{ secrets.LAMH_KEY }}
+
+jobs:
+  candidates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q pillow
+      - name: Contact sheets
+        run: |
+          bash tools/lamh_crypt.sh unpack content/$ID.enc work
+          mkdir -p /tmp/cand
+          python tools/commons_candidates.py work/${{ github.event.inputs.queries }} /tmp/cand > /tmp/cand/log.txt 2>&1 || true
+      - name: Publish (encrypted)
+        if: always()
+        run: |
+          bash tools/lamh_crypt.sh pack /tmp/cand /tmp/bundle.enc
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan "cand-$ID"
+          git rm -rfq .
+          git clean -fdxq
+          cp /tmp/bundle.enc .
+          git add -A
+          git commit -qm "candidates $ID ${GITHUB_RUN_NUMBER}"
+          git push -f origin "cand-$ID"
