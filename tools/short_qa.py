@@ -69,6 +69,8 @@ NUMW.update(script.get("numbers", {}))
 
 def norm(s):
     s = s.translate(DIGITS).replace(",", "").replace("مائة", "مئة")
+    for k, v in script.get("latin", {}).items():
+        s = re.sub(rf"(?<![A-Za-z]){re.escape(k)}(?![A-Za-z])", f" {v} ", s)
     for k in sorted(NUMW, key=len, reverse=True):
         s = re.sub(rf"(?<!\d){k}(?!\d)", NUMW[k], s)
     s = AR_DIAC.sub("", s)

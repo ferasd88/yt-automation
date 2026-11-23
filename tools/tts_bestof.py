@@ -32,6 +32,8 @@ NUMW.update(script.get("numbers", {}))
 def norm(s, keep_space=True):
     s = s.translate(DIGITS).replace(",", "").replace("٬", "")
     s = s.replace("مائة", "مئة").replace("مائه", "مئه")
+    for k, v in script.get("latin", {}).items():  # e.g. Whisper writes the brand "كيو" as "Q"
+        s = re.sub(rf"(?<![A-Za-z]){re.escape(k)}(?![A-Za-z])", f" {v} ", s)
     for k in sorted(NUMW, key=len, reverse=True):
         s = re.sub(rf"(?<!\d){k}(?!\d)", NUMW[k], s)
     s = AR_DIAC.sub("", s)
