@@ -12,6 +12,9 @@ on:
       voice_run2:
         description: "Second run id whose narration overrides the first"
         default: ""
+      voice_run3:
+        description: "Third run id whose narration overrides the second"
+        default: ""
       skip_build:
         description: "Only generate narration"
         default: "false"
@@ -127,6 +130,15 @@ jobs:
           merge-multiple: true
           run-id: ${{ github.event.inputs.voice_run2 }}
           github-token: ${{ github.token }}
+      - name: Narration overrides from a third earlier run
+        if: github.event.inputs.voice_run3 != ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: voice-*
+          path: venc2b
+          merge-multiple: true
+          run-id: ${{ github.event.inputs.voice_run3 }}
+          github-token: ${{ github.token }}
       - name: Narration generated in this run (overrides)
         if: needs.voice.result == 'success'
         uses: actions/download-artifact@v4
@@ -137,7 +149,7 @@ jobs:
       - name: Decrypt narration (later runs override earlier ones)
         run: |
           mkdir -p voice logs
-          for d in venc1 venc2 venc3; do for f in $d/*.enc; do [ -f "$f" ] && bash tools/lamh_crypt.sh unpack "$f" voice; done; done
+          for d in venc1 venc2 venc2b venc3; do for f in $d/*.enc; do [ -f "$f" ] && bash tools/lamh_crypt.sh unpack "$f" voice; done; done
           ls voice/*.wav | wc -l
       - name: Image cache
         uses: actions/cache@v4
