@@ -70,6 +70,39 @@ import librosa
 
 tts = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
 asr = WhisperModel("medium", device="cpu", compute_type="int8")
+
+# ---- cloned voice: reference clip per mood ------------------------------------------------------------
+# voice.refs      {mood: path}                    explicit mapping (paths relative to the script folder)
+# voice.refs_dir  folder of unlabeled clips + voice.ref_texts {mood: text read in the clip}:
+#                 each clip is transcribed and matched to the text it reads (best overall assignment).
+# voice.moods     {mood: {exaggeration, cfg}}     per-mood delivery; line["mood"] picks the clip.
+import itertools
+sdir = os.path.dirname(os.path.abspath(sys.argv[1]))
+refs = {k: os.path.join(sdir, v) for k, v in cfgv.get("refs", {}).items()}
+if not refs and cfgv.get("refs_dir"):
+    rdir = os.path.join(sdir, cfgv["refs_dir"])
+    clips = sorted(f for f in os.listdir(rdir) if f.endswith(".wav"))
+    texts = cfgv["ref_texts"]
+    heard = {}
+    for c in clips:
+        a, _ = librosa.load(os.path.join(rdir, c), sr=16000)
+        heard[c] = " ".join(x.text for x in asr.transcribe(a, language="ar", beam_size=5)[0])
+    moods = list(texts)
+    best_perm, best_cost = None, 9e9
+    for perm in itertools.permutations(clips, len(moods)):
+        cost = sum(cer(texts[m], heard[c]) for m, c in zip(moods, perm))
+        if cost < best_cost:
+            best_perm, best_cost = perm, cost
+    refs = {m: os.path.join(rdir, c) for m, c in zip(moods, best_perm)}
+    for m, c in zip(moods, best_perm):
+        print(f"REF {m} <- {c} cer {cer(texts[m], heard[c]):.3f} | {heard[c]}", flush=True)
+mood = ln.get("mood", cfgv.get("default_mood"))
+ref = refs.get(mood) if mood else None
+mcfg = cfgv.get("moods", {}).get(mood, {}) if mood else {}
+EXAG = mcfg.get("exaggeration", cfgv.get("exaggeration", 0.65))
+CFG = mcfg.get("cfg", cfgv.get("cfg", 0.4))
+if ref:
+    print(f"line {ln['id']} mood {mood} ref {os.path.basename(ref)} exaggeration {EXAG} cfg {CFG}", flush=True)
 ref_chars = len(norm(ln["tts"], False))
 musts = [norm(m, False) for m in ln.get("must", [])]
 
@@ -78,7 +111,7 @@ for k in range(TAKES):
     seed = 101 + 17 * k
     torch.manual_seed(seed)
     t0 = time.time()
-    wav = tts.generate(ln["tts"], language_id="ar", exaggeration=cfgv.get("exaggeration", 0.65), cfg_weight=cfgv.get("cfg", 0.4))
+    wav = tts.generate(ln["tts"], language_id="ar", audio_prompt_path=ref, exaggeration=EXAG, cfg_weight=CFG)
     y = wav.detach().cpu().numpy().squeeze().astype(np.float32)
     sr = tts.sr
     y16 = librosa.resample(y, orig_sr=sr, target_sr=16000)
@@ -116,6 +149,6 @@ os.replace(best["file"], f"{od}/{ln['id']}.wav")
 for t in takes:
     if os.path.exists(t["file"]):
         os.remove(t["file"])
-json.dump({"line": ln["id"], "best": best["take"], "takes": takes}, open(f"{od}/{ln['id']}.json", "w", encoding="utf-8"),
+json.dump({"line": ln["id"], "mood": mood, "ref": os.path.basename(ref) if ref else None, "best": best["take"], "takes": takes}, open(f"{od}/{ln['id']}.json", "w", encoding="utf-8"),
           ensure_ascii=False, indent=1)
 print(f"BEST {ln['id']}: take {best['take']} cer {best['cer']} missing {best['missing']}")
