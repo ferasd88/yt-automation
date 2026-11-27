@@ -183,6 +183,7 @@ jobs:
           cp out/stills/*.jpg /tmp/pub/stills/ 2>/dev/null || true
           cp $SHORT/credits.json /tmp/pub/ 2>/dev/null || true
           cp voice/*.json voice/log-*.txt /tmp/pub/takes/ 2>/dev/null || true
+          cp voice/*.wav /tmp/pub/takes/ 2>/dev/null || true
           cp logs/*.txt /tmp/pub/logs/ 2>/dev/null || true
           bash tools/lamh_crypt.sh pack /tmp/pub /tmp/bundle.enc
           git config user.name "github-actions[bot]"
